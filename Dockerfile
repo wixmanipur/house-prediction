@@ -1,29 +1,27 @@
-# Use Python 3.9 slim as the base image
+# Use an official Python base image
 FROM python:3.9-slim
 
-# Set the working directory in the container
+# Set the working directory
 WORKDIR /app
 
-# Expose FastAPI port
-EXPOSE 8000
+# Install system dependencies required for OpenCV and YOLO
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Keeps Python from generating .pyc files
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# Turns off buffering for easier container logging
-ENV PYTHONUNBUFFERED=1
-
-# Install dependencies
+# Copy and install Python dependencies
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Verify all required Python imports at build time (Fails early if an issue exists)
+RUN python -c "import fastapi, uvicorn, numpy, cv2, PIL, ultralytics; print('All dependencies successfully imported!')"
 
 # Copy application files
 COPY . .
 
-# Create a non-root user for security
-RUN adduser --uid 5678 --disabled-password --gecos "" appuser && \
-   chown -R appuser /app
-USER appuser
+# Expose the FastAPI port
+EXPOSE 8000
 
-# Start the application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Run the FastAPI app using Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
