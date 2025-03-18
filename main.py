@@ -1,8 +1,6 @@
-from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi import FastAPI, File, UploadFile, Request, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from fastapi.responses import HTMLResponse
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List
 import numpy as np
@@ -18,7 +16,7 @@ app = FastAPI()
 # Enable CORS for development; restrict in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Replace with your actual domain
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,24 +54,33 @@ def annotate_image(result, font_size=15, line_thickness=5, txt_color=(255, 255, 
     annotated_image = annotator.result()
     return annotated_image
 
+def image_to_base64(image):
+    """
+    Converts an OpenCV image to a Base64 encoded PNG image.
+    """
+    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+    pil_image = Image.fromarray(image_rgb)  # Convert to PIL Image
+    buffer = io.BytesIO()
+    pil_image.save(buffer, format="PNG")  # Save to a byte buffer
+    buffer.seek(0)  # Move to the beginning of the buffer
+    return base64.b64encode(buffer.read()).decode("utf-8")  # Encode to Base64 and return
+
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
-    conf: float = Form(0.4),
-    iou: float = Form(0.35),
-    imgsz: int = Form(640),
-    draw_label: bool = Form(True)
+    conf: float = Query(0.4),  # Changed from Form to Query
+    iou: float = Query(0.35),  # Changed from Form to Query
+    imgsz: int = Query(640),  # Changed from Form to Query
+    draw_label: bool = Query(True)  # Changed from Form to Query
 ):
     """
     Receives an image file along with detection parameters, processes the image using YOLO,
     and returns the number of detections and both the original and annotated images in Base64.
     """
-    # Read and decode the uploaded image
     image_bytes = await file.read()
     img_array = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     
-    # Validate image decoding
     if img is None:
         return JSONResponse(content={"error": "Invalid image file."}, status_code=400)
     
@@ -99,49 +106,40 @@ async def predict(
         draw_label=draw_label
     )
     
-    # Convert annotated image to Base64
-    annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
-    annotated_pil = Image.fromarray(annotated_image_rgb)
-    buffer = io.BytesIO()
-    annotated_pil.save(buffer, format="PNG")
-    buffer.seek(0)
-    annotated_b64 = base64.b64encode(buffer.read()).decode("utf-8")
-    
-    # Convert original image to Base64
-    original_image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    original_pil = Image.fromarray(original_image_rgb)
-    buffer_original = io.BytesIO()
-    original_pil.save(buffer_original, format="PNG")
-    buffer_original.seek(0)
-    original_b64 = base64.b64encode(buffer_original.read()).decode("utf-8")
+    # Convert images to Base64
+    original_b64 = image_to_base64(img)
+    annotated_b64 = image_to_base64(annotated_image)
     
     return JSONResponse(content={
         "predictions": predictions,
         "annotated_image": f"data:image/png;base64,{annotated_b64}",
         "original_image": f"data:image/png;base64,{original_b64}"
     })
-     
-  
+
 @app.post("/predict_multiple")
 async def predict_multiple(
     files: List[UploadFile] = File(...),
-    conf: float = Form(0.4),
-    iou: float = Form(0.35),
-    imgsz: int = Form(640),
-    draw_label: bool = Form(True)
+    conf: float = Query(0.4),  # Changed from Form to Query
+    iou: float = Query(0.35),  # Changed from Form to Query
+    imgsz: int = Query(640),  # Changed from Form to Query
+    draw_label: bool = Query(True)  # Changed from Form to Query
 ):
     results_list = []
     for file in files:
+        
+        # Read the uploaded image
         image_bytes = await file.read()
         img_array = np.frombuffer(image_bytes, np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
     
         # Validate image decoding
         if img is None:
+            logger.error(f"Failed to decode image: {file.filename}")
             results_list.append({"filename": file.filename, "error": "Invalid image file."})
             continue
         
         try:
+            logger.info(f"Running prediction for file: {file.filename}")
             results = model.predict(
                 img,
                 conf=conf,
@@ -149,6 +147,7 @@ async def predict_multiple(
                 imgsz=imgsz
             )
         except Exception as e:
+            logger.error(f"Prediction failed for {file.filename}: {str(e)}")
             results_list.append({"filename": file.filename, "error": f"Model prediction failed: {str(e)}"})
             continue
         
@@ -164,21 +163,9 @@ async def predict_multiple(
             draw_label=draw_label
         )
         
-        # Convert annotated image to Base64
-        annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
-        annotated_pil = Image.fromarray(annotated_image_rgb)
-        buffer = io.BytesIO()
-        annotated_pil.save(buffer, format="PNG")
-        buffer.seek(0)
-        annotated_b64 = base64.b64encode(buffer.read()).decode("utf-8")
-        
-        # Convert original image to Base64
-        original_image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        original_pil = Image.fromarray(original_image_rgb)
-        buffer_original = io.BytesIO()
-        original_pil.save(buffer_original, format="PNG")
-        buffer_original.seek(0)
-        original_b64 = base64.b64encode(buffer_original.read()).decode("utf-8")
+        # Convert images to Base64
+        original_b64 = image_to_base64(img)
+        annotated_b64 = image_to_base64(annotated_image)
         
         results_list.append({
             "filename": file.filename,
@@ -186,10 +173,16 @@ async def predict_multiple(
             "annotated_image": f"data:image/png;base64,{annotated_b64}",
             "original_image": f"data:image/png;base64,{original_b64}"
         })
-        
+    
     return JSONResponse(content={"results": results_list})
 
-# (Optional) Health-check endpoint
 @app.get("/health")
 async def health_check():
-    return JSONResponse(content={"status": "ok"})
+    try:
+        # Check if the model is available
+        if model is not None:
+            return JSONResponse(content={"status": "ok"})
+        else:
+            raise Exception("Model is not loaded.")
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=500)
