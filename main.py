@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, Request, Query
+from fastapi import FastAPI, File, UploadFile, Request, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,10 +68,10 @@ def image_to_base64(image):
 @app.post("/predict")
 async def predict(
     file: UploadFile = File(...),
-    conf: float = Query(0.4),  # Changed from Form to Query
-    iou: float = Query(0.35),  # Changed from Form to Query
-    imgsz: int = Query(640),  # Changed from Form to Query
-    draw_label: bool = Query(True)  # Changed from Form to Query
+    conf: float = Form(0.4),
+    iou: float = Form(0.35),
+    imgsz: int = Form(640),
+    draw_label: bool = Form(True)
 ):
     """
     Receives an image file along with detection parameters, processes the image using YOLO,
@@ -119,10 +119,10 @@ async def predict(
 @app.post("/predict_multiple")
 async def predict_multiple(
     files: List[UploadFile] = File(...),
-    conf: float = Query(0.4),  # Changed from Form to Query
-    iou: float = Query(0.35),  # Changed from Form to Query
-    imgsz: int = Query(640),  # Changed from Form to Query
-    draw_label: bool = Query(True)  # Changed from Form to Query
+    conf: float = Form(0.4),
+    iou: float = Form(0.35),
+    imgsz: int = Form(640),
+    draw_label: bool = Form(True)
 ):
     results_list = []
     for file in files:
@@ -134,12 +134,10 @@ async def predict_multiple(
     
         # Validate image decoding
         if img is None:
-            logger.error(f"Failed to decode image: {file.filename}")
             results_list.append({"filename": file.filename, "error": "Invalid image file."})
             continue
         
         try:
-            logger.info(f"Running prediction for file: {file.filename}")
             results = model.predict(
                 img,
                 conf=conf,
@@ -147,7 +145,6 @@ async def predict_multiple(
                 imgsz=imgsz
             )
         except Exception as e:
-            logger.error(f"Prediction failed for {file.filename}: {str(e)}")
             results_list.append({"filename": file.filename, "error": f"Model prediction failed: {str(e)}"})
             continue
         
