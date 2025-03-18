@@ -1,21 +1,38 @@
-import os
-import cv2
+from fastapi import FastAPI, File, UploadFile, Form, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import List
 import numpy as np
+import cv2
 import io
 import base64
-from flask import Flask, request, jsonify, render_template
 from PIL import Image
 from ultralytics import YOLO
 from ultralytics.utils.plotting import Annotator, colors
 
-app = Flask(__name__)
+app = FastAPI()
 
-# Load the YOLO model
-model = YOLO("model/yolo11m.pt")
+# Enable CORS for development; restrict in production
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.route("/")
-def index():
-    return render_template("index.html")
+# Load your pre-trained YOLO model
+model = YOLO('model/yolo11m.pt')
+
+# Serve static files (CSS, JS)
+app.mount("/static", StaticFiles(directory="templates"), name="static")
+
+@app.get("/")
+async def homepage():
+    return FileResponse("templates/index.html")
 
 def annotate_image(result, font_size=15, line_thickness=5, txt_color=(255, 255, 255), draw_label=True):
     """
@@ -39,128 +56,140 @@ def annotate_image(result, font_size=15, line_thickness=5, txt_color=(255, 255, 
     annotated_image = annotator.result()
     return annotated_image
 
-
-@app.route("/predict", methods=["POST"])
-def predict():
+@app.post("/predict")
+async def predict(
+    file: UploadFile = File(...),
+    conf: float = Form(0.4),
+    iou: float = Form(0.35),
+    imgsz: int = Form(640),
+    draw_label: bool = Form(True)
+):
     """
-    Receives an image file along with optional detection parameters, processes the image using YOLO,
+    Receives an image file along with detection parameters, processes the image using YOLO,
     and returns the number of detections and both the original and annotated images in Base64.
-    Optional parameters (via form data):
-      - conf: Confidence threshold (default 0.4)
-      - iou: IoU threshold (default 0.35)
-      - imgsz: Image size (default 640)
-      - draw_label: "true" or "false" (default "true")
     """
-    file = request.files.get("file")
-    if not file:
-        return jsonify({"error": "No file uploaded."}), 400
-
-    # Get parameters from form data, with defaults
-    try:
-        conf = float(request.form.get("conf", 0.4))
-        iou = float(request.form.get("iou", 0.35))
-        imgsz = int(request.form.get("imgsz", 640))
-        draw_label_str = request.form.get("draw_label", "true")
-        draw_label = draw_label_str.lower() == "true"
-    except Exception as e:
-        return jsonify({"error": f"Invalid parameter: {str(e)}"}), 400
-
-    # Read and decode the uploaded image.
-    file_bytes = file.read()
-    np_img = np.frombuffer(file_bytes, np.uint8)
-    img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+    # Read and decode the uploaded image
+    image_bytes = await file.read()
+    img_array = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    
+    # Validate image decoding
     if img is None:
-        return jsonify({"error": "Invalid image file."}), 400
-
+        return JSONResponse(content={"error": "Invalid image file."}, status_code=400)
+    
     try:
-        results = model.predict(img, conf=conf, iou=iou, imgsz=imgsz)
+        results = model.predict(
+            img,
+            conf=conf,
+            iou=iou,
+            imgsz=imgsz
+        )
     except Exception as e:
-        return jsonify({"error": f"Model prediction failed: {str(e)}"}), 500
-
+        return JSONResponse(content={"error": f"Model prediction failed: {str(e)}"}, status_code=500)
+    
     result = results[0]
-    predictions = len(result.boxes) if hasattr(result, "boxes") else 0
-
-    # Annotate the image.
-    annotated_image = annotate_image(result, font_size=15, line_thickness=2, txt_color=(0, 0, 0), draw_label=draw_label)
-
-    # Convert annotated image to Base64.
+    predictions = len(result.boxes) if hasattr(result, 'boxes') else 0
+    
+    # Annotate image
+    annotated_image = annotate_image(
+        result,
+        font_size=15,
+        line_thickness=2,
+        txt_color=(0, 0, 0),
+        draw_label=draw_label
+    )
+    
+    # Convert annotated image to Base64
     annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
     annotated_pil = Image.fromarray(annotated_image_rgb)
-    buf = io.BytesIO()
-    annotated_pil.save(buf, format="PNG")
-    buf.seek(0)
-    annotated_b64 = base64.b64encode(buf.read()).decode("utf-8")
-
-    # Convert original image to Base64.
+    buffer = io.BytesIO()
+    annotated_pil.save(buffer, format="PNG")
+    buffer.seek(0)
+    annotated_b64 = base64.b64encode(buffer.read()).decode("utf-8")
+    
+    # Convert original image to Base64
     original_image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     original_pil = Image.fromarray(original_image_rgb)
-    buf_orig = io.BytesIO()
-    original_pil.save(buf_orig, format="PNG")
-    buf_orig.seek(0)
-    original_b64 = base64.b64encode(buf_orig.read()).decode("utf-8")
-
-    return jsonify({
+    buffer_original = io.BytesIO()
+    original_pil.save(buffer_original, format="PNG")
+    buffer_original.seek(0)
+    original_b64 = base64.b64encode(buffer_original.read()).decode("utf-8")
+    
+    return JSONResponse(content={
         "predictions": predictions,
         "annotated_image": f"data:image/png;base64,{annotated_b64}",
         "original_image": f"data:image/png;base64,{original_b64}"
     })
-
-@app.route("/predict_multiple", methods=["POST"])
-def predict_multiple():
-    """
-    Accepts multiple image files via the "files" field, along with optional parameters,
-    and returns a list of detection results (with each image's annotated and original images in Base64).
-    """
-    files = request.files.getlist("files")
-    if not files:
-        return jsonify({"error": "No files uploaded."}), 400
-
-    try:
-        conf = float(request.form.get("conf", 0.4))
-        iou = float(request.form.get("iou", 0.35))
-        imgsz = int(request.form.get("imgsz", 640))
-        draw_label_str = request.form.get("draw_label", "true")
-        draw_label = draw_label_str.lower() == "true"
-    except Exception as e:
-        return jsonify({"error": f"Invalid parameter: {str(e)}"}), 400
-
+     
+  
+@app.post("/predict_multiple")
+async def predict_multiple(
+    files: List[UploadFile] = File(...),
+    conf: float = Form(0.4),
+    iou: float = Form(0.35),
+    imgsz: int = Form(640),
+    draw_label: bool = Form(True)
+):
     results_list = []
     for file in files:
-        file_bytes = file.read()
-        np_img = np.frombuffer(file_bytes, np.uint8)
-        img = cv2.imdecode(np_img, cv2.IMREAD_COLOR)
+        image_bytes = await file.read()
+        img_array = np.frombuffer(image_bytes, np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    
+        # Validate image decoding
         if img is None:
             results_list.append({"filename": file.filename, "error": "Invalid image file."})
             continue
+        
         try:
-            results = model.predict(img, conf=conf, iou=iou, imgsz=imgsz)
+            results = model.predict(
+                img,
+                conf=conf,
+                iou=iou,
+                imgsz=imgsz
+            )
         except Exception as e:
             results_list.append({"filename": file.filename, "error": f"Model prediction failed: {str(e)}"})
             continue
+        
         result = results[0]
-        predictions = len(result.boxes) if hasattr(result, "boxes") else 0
-        annotated_image = annotate_image(result, font_size=15, line_thickness=2, txt_color=(0, 0, 0), draw_label=draw_label)
+        predictions = len(result.boxes) if hasattr(result, 'boxes') else 0
+        
+        # Annotate image
+        annotated_image = annotate_image(
+            result,
+            font_size=15,
+            line_thickness=2,
+            txt_color=(0, 0, 0),
+            draw_label=draw_label
+        )
+        
+        # Convert annotated image to Base64
         annotated_image_rgb = cv2.cvtColor(annotated_image, cv2.COLOR_BGR2RGB)
         annotated_pil = Image.fromarray(annotated_image_rgb)
-        buf = io.BytesIO()
-        annotated_pil.save(buf, format="PNG")
-        buf.seek(0)
-        annotated_b64 = base64.b64encode(buf.read()).decode("utf-8")
+        buffer = io.BytesIO()
+        annotated_pil.save(buffer, format="PNG")
+        buffer.seek(0)
+        annotated_b64 = base64.b64encode(buffer.read()).decode("utf-8")
+        
+        # Convert original image to Base64
         original_image_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         original_pil = Image.fromarray(original_image_rgb)
-        buf_orig = io.BytesIO()
-        original_pil.save(buf_orig, format="PNG")
-        buf_orig.seek(0)
-        original_b64 = base64.b64encode(buf_orig.read()).decode("utf-8")
+        buffer_original = io.BytesIO()
+        original_pil.save(buffer_original, format="PNG")
+        buffer_original.seek(0)
+        original_b64 = base64.b64encode(buffer_original.read()).decode("utf-8")
+        
         results_list.append({
             "filename": file.filename,
             "predictions": predictions,
             "annotated_image": f"data:image/png;base64,{annotated_b64}",
             "original_image": f"data:image/png;base64,{original_b64}"
         })
+        
+    return JSONResponse(content={"results": results_list})
 
-    return jsonify({"results": results_list})
-
-
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+# (Optional) Health-check endpoint
+@app.get("/health")
+async def health_check():
+    return JSONResponse(content={"status": "ok"})
